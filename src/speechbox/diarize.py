@@ -34,7 +34,7 @@ class ASRDiarizationPipeline:
             "automatic-speech-recognition",
             model=asr_model,
             chunk_length_s=chunk_length_s,
-            token=use_auth_token, # 08/25/2023: Changed argument from use_auth_token to token
+            use_auth_token=use_auth_token,
             **kwargs,
         )
         diarization_pipeline = Pipeline.from_pretrained(diarizer_model, use_auth_token=use_auth_token)
@@ -72,12 +72,7 @@ class ASRDiarizationPipeline:
             group_by_speaker (`bool`):
                 Whether to group consecutive utterances by one speaker into a single segment. If False, will return
                 transcriptions on a chunk-by-chunk basis.
-            kwargs (remaining dictionary of keyword arguments, *optional*):
-                Can be used to update additional asr or diarization configuration parameters
-                        - To update the asr configuration, use the prefix *asr_* for each configuration parameter.
-                        - To update the diarization configuration, use the prefix *diarization_* for each configuration parameter.
-                        - Added this support related to issue #25: 08/25/2023
-                            
+
         Return:
             A list of transcriptions. Each list item corresponds to one chunk / segment of transcription, and is a
             dictionary with the following keys:
@@ -85,26 +80,14 @@ class ASRDiarizationPipeline:
                 - **speaker** (`str`) -- The associated speaker.
                 - **timestamps** (`tuple`) -- The start and end time for the chunk / segment.
         """
-        kwargs_asr = {
-            argument[len("asr_") :]: value for argument, value in kwargs.items() if argument.startswith("asr_")
-        }
-
-        kwargs_diarization = {
-            argument[len("diarization_") :]: value for argument, value in kwargs.items() if argument.startswith("diarization_")
-        }
-        
         inputs, diarizer_inputs = self.preprocess(inputs)
 
         diarization = self.diarization_pipeline(
             {"waveform": diarizer_inputs, "sample_rate": self.sampling_rate},
-            **kwargs_diarization,
+            **kwargs,
         )
 
-        segments = []
-        for segment, track, label in diarization.itertracks(yield_label=True):
-            segments.append({'segment': {'start': segment.start, 'end': segment.end},
-                             'track': track,
-                             'label': label})
+        segments = diarization.for_json()["content"]
 
         # diarizer output may contain consecutive segments from the same speaker (e.g. {(0 -> 1, speaker_1), (1 -> 1.5, speaker_1), ...})
         # we combine these segments to give overall timestamps for each speaker's turn (e.g. {(0 -> 1.5, speaker_1), ...})
@@ -136,12 +119,19 @@ class ASRDiarizationPipeline:
         asr_out = self.asr_pipeline(
             {"array": inputs, "sampling_rate": self.sampling_rate},
             return_timestamps=True,
-            **kwargs_asr,
+            **kwargs,
         )
         transcript = asr_out["chunks"]
 
         # get the end timestamps for each chunk from the ASR output
         end_timestamps = np.array([chunk["timestamp"][-1] for chunk in transcript])
+        # make sure no None values are present (might happen if end is not recognized)
+        if end_timestamps[-1] is None:
+            end_timestamps[-1] = inputs.size/self.sampling_rate # set to end of audio
+            # change last element of transcript accordingly (workaround for tuple)
+            temp_list = list(transcript[-1]["timestamp"])
+            temp_list[-1] = end_timestamps[-1]
+            transcript[-1]["timestamp"] = tuple(temp_list)
         segmented_preds = []
 
         # align the diarizer timestamps and the ASR timestamps
@@ -164,8 +154,12 @@ class ASRDiarizationPipeline:
                     segmented_preds.append({"speaker": segment["speaker"], **transcript[i]})
 
             # crop the transcripts and timestamp lists according to the latest timestamp (for faster argmin)
-            transcript = transcript[upto_idx + 1 :]
-            end_timestamps = end_timestamps[upto_idx + 1 :]
+            # transcript = transcript[upto_idx + 1 :]
+            # end_timestamps = end_timestamps[upto_idx + 1 :]
+            # only if something is left
+            if len(transcript) > upto_idx + 1:
+                transcript = transcript[upto_idx + 1 :]
+                end_timestamps = end_timestamps[upto_idx + 1 :]
 
         return segmented_preds
 
