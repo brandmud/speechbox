@@ -4,6 +4,7 @@ import numpy as np
 import requests
 import torch
 from pyannote.audio import Pipeline
+from pyannote.audio.pipelines.utils.hook import ProgressHook
 from torchaudio import functional as F
 from transformers import pipeline
 from transformers.pipelines.audio_utils import ffmpeg_read
@@ -82,10 +83,13 @@ class ASRDiarizationPipeline:
         """
         inputs, diarizer_inputs = self.preprocess(inputs)
 
-        diarization = self.diarization_pipeline(
-            {"waveform": diarizer_inputs, "sample_rate": self.sampling_rate},
-            **kwargs,
-        )
+        # get the speaker diarization timestamps
+        with ProgressHook() as hook:
+            diarization = self.diarization_pipeline(
+                {"waveform": diarizer_inputs, "sample_rate": self.sampling_rate},
+                hook=hook,
+                **kwargs,
+            )
 
         segments = diarization.for_json()["content"]
 
